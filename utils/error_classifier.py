@@ -149,7 +149,7 @@ def classify_ssl_error(error: ssl.SSLError, bytes_read: int) -> Tuple[str, str, 
     return ("[red]SSL ERR[/red]", clean_detail(str(error)[:40]), bytes_read)
 
 
-def classify_connect_error(error: Exception, bytes_read: int) -> Tuple[str, str, int]:
+def classify_connect_error(error: Exception, bytes_read: int, stage: str = "unknown") -> Tuple[str, str, int]:
     """Единая классификация ошибок установки соединения (L3/L4/DNS)."""
     full_text = collect_error_text(error)
     err_errno = get_errno_from_chain(error)
@@ -157,8 +157,17 @@ def classify_connect_error(error: Exception, bytes_read: int) -> Tuple[str, str,
     if isinstance(error, httpx.PoolTimeout) or "pool timeout" in full_text:
         return ("[magenta]POOL TIMEOUT[/magenta]", "Нехватка сокетов, снизьте параллелизм", bytes_read)
 
-    if isinstance(error, httpx.ConnectTimeout) or "connect timeout" in full_text:
-        return ("[red]TIMEOUT[/red]", "TCP timeout (SYN Drop)", bytes_read)
+    if isinstance(error, httpx.ConnectTimeout) or "connect timeout" in full_text or "timed out" in full_text:
+        if stage == "tls_handshake":
+            return ("[bold red]TLS DROP[/bold red]", "TLS Handshake timeout", bytes_read)
+        elif stage == "tcp_connect":
+            return ("[bold red]SYN DROP[/bold red]", "TCP SYN timeout", bytes_read)
+        elif stage == "sending_data":
+            return ("[red]SEND TIMEOUT[/red]", "Таймаут отправки данных", bytes_read)
+        elif stage == "reading_data":
+            return ("[red]READ TIMEOUT[/red]", "Таймаут чтения данных", bytes_read)
+        else:
+            return ("[red]TIMEOUT[/red]", f"Timeout ({stage})", bytes_read)
 
     # DNS
     gai = find_cause(error, socket.gaierror)
@@ -205,7 +214,9 @@ def classify_connect_error(error: Exception, bytes_read: int) -> Tuple[str, str,
         return ("[bold red]ABORT[/bold red]", "TCP соединение прервано", bytes_read)
 
     if find_cause(error, TimeoutError) is not None or err_errno in (errno.ETIMEDOUT, config.WSAETIMEDOUT) or "timed out" in full_text:
-        return ("[red]TIMEOUT[/red]", "TCP timeout (SYN Drop)", bytes_read)
+        if tcp_connected:
+            return ("[bold red]TLS DROP[/bold red]", "TLS Handshake timeout", bytes_read)
+        return ("[red]TIMEOUT[/red]", "TCP timeout", bytes_read)
 
     if err_errno in (errno.ENETUNREACH, config.WSAENETUNREACH) or "network is unreachable" in full_text:
         return ("[red]NET UNREACH[/red]", "Нет маршрута (ICMP unreach)", bytes_read)

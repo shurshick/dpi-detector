@@ -31,6 +31,25 @@ async def _fat_probe_keepalive(
     if sni:
         base_headers["Host"] = sni
 
+    connection_state = {"stage": "init"}
+
+    async def trace_hook(event_name, info):
+        # TCP (SYN)
+        if event_name == "connection.connect_tcp.started":
+            connection_state["stage"] = "tcp_connect"
+        elif event_name == "connection.connect_tcp.complete":
+            connection_state["stage"] = "tcp_connected"
+        # TLS Handshake
+        elif event_name == "connection.start_tls.started":
+            connection_state["stage"] = "tls_handshake"
+        elif event_name == "connection.start_tls.complete":
+            connection_state["stage"] = "tls_connected"
+        # Отправка/чтение данных
+        elif event_name.startswith("http11.send_request"):
+            connection_state["stage"] = "sending_data"
+        elif event_name.startswith("http11.receive_response"):
+            connection_state["stage"] = "reading_data"
+
     alive_str = "[dim]—[/dim]"
     chunks_count = 16
     chunk_size = 4000
@@ -43,7 +62,7 @@ async def _fat_probe_keepalive(
     else:
         dynamic_timeout = None
 
-    extensions = {}
+    extensions = {"trace": trace_hook}
     if sni and port != 80:
         extensions["sni_hostname"] = sni
 
@@ -91,7 +110,7 @@ async def _fat_probe_keepalive(
             await asyncio.sleep(0.05)
 
         except (httpx.ConnectTimeout, httpx.ConnectError) as e:
-            label, detail, _ = classify_connect_error(e, 0)
+            label, detail, _ = classify_connect_error(e, 0, stage=connection_state["stage"])
             if i == 0:
                 return "[red]Нет[/red]", label, detail, measured_rtt
             return alive_str, "[bold red]DETECTED[/bold red]", f"{detail} at {i*4}KB", measured_rtt

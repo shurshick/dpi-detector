@@ -95,6 +95,21 @@ async def _check_tls_single(
         elif fake_type == "local":
             return ("[bold yellow]LOCAL IP[/bold yellow]", f"Локальный IP {resolved_ip}", 0, 0.0)
 
+    connection_state = {"stage": "init"}
+    async def trace_hook(event_name, info):
+        if event_name == "connection.connect_tcp.started":
+            connection_state["stage"] = "tcp_connect"
+        elif event_name == "connection.connect_tcp.complete":
+            connection_state["stage"] = "tcp_connected"
+        elif event_name == "connection.start_tls.started":
+            connection_state["stage"] = "tls_handshake"
+        elif event_name == "connection.start_tls.complete":
+            connection_state["stage"] = "tls_connected"
+        elif "send_request" in event_name:
+            connection_state["stage"] = "sending_data"
+        elif "receive_response" in event_name:
+            connection_state["stage"] = "reading_data"
+
     async with semaphore:
         start = time.time()
 
@@ -106,7 +121,8 @@ async def _check_tls_single(
                     "User-Agent": config.USER_AGENT,
                     "Accept-Encoding": "identity",
                     "Connection": "close",
-                }
+                },
+                extensions={"trace": trace_hook}
             )
             response = await client.send(req, stream=True)
             status_code = response.status_code
@@ -148,7 +164,7 @@ async def _check_tls_single(
                 return ("[green]OK[/green]", f"HTTP {status_code}", bytes_read, elapsed)
 
         except (httpx.ConnectTimeout, httpx.ConnectError) as e:
-            label, detail, br = classify_connect_error(e, bytes_read)
+            label, detail, br = classify_connect_error(e, bytes_read, stage=connection_state["stage"])
             return (label, detail, br, time.time() - start)
 
         except httpx.ReadTimeout:
@@ -207,6 +223,17 @@ async def check_http_injection(
     """Проверяет HTTP-инжекцию (plain HTTP). Клиент передаётся снаружи."""
     clean_domain = domain.replace("https://", "").replace("http://", "")
 
+    connection_state = {"stage": "init"}
+    async def trace_hook(event_name, info):
+        if event_name == "connection.connect_tcp.started":
+            connection_state["stage"] = "tcp_connect"
+        elif event_name == "connection.connect_tcp.complete":
+            connection_state["stage"] = "tcp_connected"
+        elif "send_request" in event_name:
+            connection_state["stage"] = "sending_data"
+        elif "receive_response" in event_name:
+            connection_state["stage"] = "reading_data"
+
     try:
         req = client.build_request(
             "GET",
@@ -215,7 +242,8 @@ async def check_http_injection(
                 "User-Agent": config.USER_AGENT,
                 "Accept-Encoding": "identity",
                 "Connection": "close",
-            }
+            },
+            extensions={"trace": trace_hook}
         )
         response = await client.send(req, stream=True)
         status_code = response.status_code
@@ -253,7 +281,7 @@ async def check_http_injection(
         return ("[green]OK[/green]", f"{status_code}")
 
     except (httpx.ConnectTimeout, httpx.ConnectError) as e:
-            label, detail, _ = classify_connect_error(e, 0)
+            label, detail, _ = classify_connect_error(e, 0, stage=connection_state["stage"])
             return (label, detail)
 
     except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
